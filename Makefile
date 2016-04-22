@@ -1,7 +1,5 @@
-# -----------------------------------------------------------------------------
-# Date:    2014-12-14
-# Author:  René Schwaiger (sanssecours@f-m.fm)
-# Version: 10
+# ------------------------------------------------------------------------------
+# Author: René Schwaiger (sanssecours@f-m.fm)
 #
 #                   Run various tests for this bundle
 #
@@ -29,16 +27,7 @@
 
 .PHONY: checkstyle cramtests perltests rubydoctests toxtests
 
-.PHONY: run all clean cramtests nosetests latex_watch
-
 # -- Variables -----------------------------------------------------------------
-
-# We need to set the bundle support location to the support folder of the LaTeX
-# bundle. If we do not set this variable explicitly, then `TM_BUNDLE_SUPPORT`
-# will be set to the location of the bundle support folder for the `Make`
-# bundle. This will lead to errors since `latex_watch` expects that
-# `TM_BUNDLE_SUPPORT` is set “correctly”.
-export TM_BUNDLE_SUPPORT = $(CURDIR)/Support
 
 # We need to set the bundle support location to the support folder of the LaTeX
 # bundle. If we do not set this variable explicitly, then `TM_BUNDLE_SUPPORT`
@@ -90,10 +79,5 @@ perltests: checkstyle_perl
 rubydoctests: checkstyle_ruby
 	rubydoctest $(RUBY_FILES)
 
-cramtests: clean
-	cd Tests/Cram && cram *.t
-
-latex_watch:
-	TM_PID=$(shell pgrep TextMate)
-	Support/bin/latex_watch.pl -d --textmate-pid=$(TM_PID) \
-		"$(CURDIR)/Tests/TeX/makeindex.tex"
+toxtests: checkstyle_python
+	tox
