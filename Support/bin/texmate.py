@@ -1363,7 +1363,7 @@ if __name__ == '__main__':
             
             def round_finished(parser, fatal_error, number_errors, number_warnings):
                 update_marks(cache_filename, parser.marks)
-        
+
                 #don't want sync as it doesn't work with multiple source files
                 use_pdfsync = False; #'pdfsync' in packages or synctex
                 if tm_autoview and number_errors < 1 and not suppress_viewer:
@@ -1372,6 +1372,16 @@ if __name__ == '__main__':
                         number_errors > 1 or number_warnings > 0
                         and tm_preferences['latexKeepLogWin'],
                         use_pdfsync, line_number)
+                if number_errors > 0: #bring html output window to front
+                    command = '''/usr/bin/osascript -e 'tell application "System Events" to perform action "AXRaise" of (first window whose name contains "…") of process "TextMate"' '''
+
+                    process = Popen(command, shell=True, stdout=PIPE, stdin=PIPE,
+                                    stderr=STDOUT, close_fds=True)                        
+
+                    process.wait()
+                    
+                    
+                    
 
             command_parser = LaTexMkParser(process.stdout, verbose, 
                                            filename, use_pvc, round_finished)
