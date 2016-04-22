@@ -1,1 +1,16 @@
+# ------------------------------------------------------------------------------
+# Author:  René Schwaiger (sanssecurs@f-m.fm)
+# Date:    2015-01-08
+# Version: 2
+#
+#                       TextMate project settings
+# ------------------------------------------------------------------------------
+
 projectDirectory = "$CWD"
+
+include = "{$include,.rubocop.yml}"
+exclude = "{$exclude,*.scpt}"
+
+[ Tests/Perl/*.t ]
+fileType = source.perl
+tabSize  = 4

@@ -1,10 +1,8 @@
 #! /usr/bin/perl
 
 # LaTeX Watch,
-our $VERSION = "3.7";
-
 #  - by Robin Houston, 2007, 2008.
-#  - by René Schwaiger, 2014
+#  - by René Schwaiger, 2014, 2015.
 
 # Usage: latex_watch.pl [ options ] file.tex
 #
@@ -21,15 +19,21 @@ our $VERSION = "3.7";
 #       -d --textmate-pid=$tm_pid path/to/texfile.tex
 #
 
-# Changelog now at end of file.
-
 use strict;
 use warnings;
-use POSIX ();
+
+use Cwd qw(abs_path);
 use File::Basename;
 use File::Copy 'copy';
-use File::Spec;
+use File::Path 'remove_tree';
 use Getopt::Long qw(GetOptions :config no_auto_abbrev bundling);
+use POSIX ();
+use Time::HiRes 'sleep';
+
+use lib dirname( dirname abs_path $0) . '/lib/Perl';
+use Latex qw(guess_tex_engine master);
+
+our $VERSION = "3.11";
 
 #############
 # Configure #
@@ -128,39 +132,6 @@ main_loop();
     }
 }
 
-# Guess the TeX engine which should be used to translate a certain TeX-file.
-#
-# Arguments:
-#
-#      filepath - The file path to the TeX file either as absolute path or
-#                 relative to the location of this file
-#
-# Returns:
-#
-#      A string containing the TeX engine for the given file or an empty
-#      string if the engine could not be determined
-#
-# Example:
-#
-#   We assume `test.tex` contains the line `%!TEX TS-program = pdflatex`
-#   $ guess_tex_engine(test.tex)
-#   "pdflatex"
-#
-sub guess_tex_engine {
-    open( my $fh, "<", @_ )
-      or die "cannot open @_: $!";
-
-    # TS-program is case insensitive e.g. `LaTeX` should be the same as `latex`
-    my $engines = "(?i)latex|lualatex|pdflatex|xelatex(?-i)";
-    while ( my $line = <$fh> ) {
-        if ( $line =~ /%!TEX(?:\s+)(?:TS-)program(?:\s*)=(?:\s*)($engines)/ ) {
-            return lc("$1");
-            close($fh);
-        }
-    }
-    return "";
-}
-
 sub get_prefs {
     my $engine = guess_tex_engine("$absolute_wd/$name.tex");
     debug_msg("Found type setting program: $engine");
@@ -168,7 +139,7 @@ sub get_prefs {
     return (
         engine  => $engine,
         options => getPreference( latexEngineOptions => "" ),
-        viewer  => getPreference( latexViewer        => "TextMate" ),
+        viewer  => getPreference( latexViewer => "TextMate" ),
     );
 }
 
@@ -188,9 +159,7 @@ sub init_environment {
       . "TextMate/Managed/Bundles/Bundle Support.tmbundle/Support/shared"
       if !defined $ENV{TM_SUPPORT_PATH};
     if ( !defined $ENV{TM_BUNDLE_SUPPORT} ) {
-        $ENV{TM_BUNDLE_SUPPORT} =
-          dirname( File::Spec->rel2abs(__FILE__) );
-        $ENV{TM_BUNDLE_SUPPORT} =~ s/\/bin$//;
+        $ENV{TM_BUNDLE_SUPPORT} = dirname( dirname abs_path $0);
     }
 
     # Add TextMate support paths
@@ -227,9 +196,15 @@ sub parse_command_line_options {
 
 sub parse_file_path {
     my $filepath = shift(@ARGV);
+    my $error;
     fail( "File not saved", "You must save the file before it can be watched" )
       if !defined($filepath)
       or $filepath eq "";
+
+    ( $error, $filepath ) = master($filepath) if -r $filepath;
+
+    # filepath contains error message in case of error
+    fail( "Incorrect master file", $filepath ) if $error;
 
     # Parse and verify file path
     my ( $wd, $name, $absolute_wd );
@@ -237,7 +212,7 @@ sub parse_file_path {
         $wd = $1;
         my $fullname = $';
         if ( $fullname =~ /\.tex\z/ ) {
-            $name    = $`;
+            $name = $`;
         }
         else {
             fail(
@@ -263,7 +238,8 @@ sub parse_file_path {
 }
 
 # Persistent state
-my ( %files_mtimes, $cleanup_viewer, $ping_viewer );
+my ( %files_mtimes, $cleanup_viewer, $ping_viewer, $notification_token,
+    $typesetting_errors );
 
 #############
 # Main loop #
@@ -271,11 +247,14 @@ my ( %files_mtimes, $cleanup_viewer, $ping_viewer );
 
 sub main_loop {
     my $ping_counter = 10;
+    $typesetting_errors = 0;
+    $notification_token = '';
     while (1) {
         if ( document_has_changed() ) {
             debug_msg("Reloading file");
-            compile() and view();
-            parse_log();
+            my ( $output_exists, $error ) = compile();
+            view() if $output_exists;
+            parse_log($error);
             if ( defined($progressbar_pid) ) {
                 debug_msg("Closing progress bar window ($progressbar_pid)");
                 kill( 9, $progressbar_pid )
@@ -300,7 +279,7 @@ sub main_loop {
               };
         }
 
-        select( undef, undef, undef, 0.5 );    # Sleep for 0.5 seconds
+        sleep(0.5);
     }
 }
 
@@ -311,20 +290,26 @@ sub main_loop {
 # Clean up if we're interrupted or die
 sub clean_up {
     debug_msg("Cleaning up");
-    unlink(
-        map( "$wd/$name.$_",
-            qw(acn acr alg aux bbl bcf blg fdb_latexmk fls fmt glo glg gls idx
-              ilg ind ini ist latexmk.log log maf mtc mtc1 out pdfsync
-              run.xml synctex.gz toc) )
-    ) if defined($wd);
-    # Remove LaTeX bundle cache file
-    unlink("$wd/.$name.lb") if defined($wd);
+    if ( defined($wd) ) {
+        unlink(
+            map( "$wd/$name.$_",
+                qw(acn acr alg aux bbl bcf blg fdb_latexmk fls fmt glo glg gls
+                  idx ilg ind ini ist latexmk.log log maf mtc mtc1 nav nlo nls
+                  pytxcode out pdfsync run.xml snm synctex.gz toc) )
+        );
 
+        # Remove LaTeX bundle cache file
+        unlink("$wd/.$name.lb");
+        ( my $cache_name = $name ) =~ s/ /-/g;
+        remove_tree( "$wd/pythontex-files-" . $cache_name );
+        remove_tree( "$wd/_minted-" . $cache_name );
+    }
     $cleanup_viewer->() if defined $cleanup_viewer;
     if ( defined($progressbar_pid) ) {
         debug_msg("Closing progress bar window as part of cleanup");
         kill( 9, $progressbar_pid );
     }
+    close_notification_window() if defined($notification_token);
     if ( defined $name ) {
         unlink "$wd/.$name.watcher_pid"    # Do this last
           or debug_msg("Failed to unlink $wd/.$name.watcher_pid: $!");
@@ -446,9 +431,9 @@ sub compile {
         "@tex '$wd/$name.tex' &> '$name.latexmk.log'",
         sub {
             if ( $? == 1 || $? == 2 || $? == 12 ) {
+
                 # An error in the document
-                parse_log();
-                offer_to_show_log();
+                debug_msg("Typesetting command failed with error code $?\n");
                 $error = 1;
             }
             else {
@@ -464,44 +449,86 @@ sub compile {
         if ( -e "$wd/$name.ps" ) {
             $compiled_document      = "$wd/$name.ps";
             $compiled_document_name = "$name.ps";
-            return 1;    # Success!
+            return ( 1, $error );    # Success!
         }
         else {
-            return;      # Failure
+            return ( 0, $error );    # Failure
         }
     }
-    else {               # PDF mode
+    else {                           # PDF mode
         if ( -e "$wd/$name.pdf" ) {
             $compiled_document      = "$wd/$name.pdf";
             $compiled_document_name = "$name.pdf";
-            return 1;    # Success!
+            return ( 1, $error );    # Success!
         }
         else {
-            return;      # Failure
+            return ( 0, $error );    # Failure
         }
     }
 }
 
 sub parse_log {
-    fail_unless_system( "texparser.py", "$name.latexmk.log", "$wd/$name" );
+    my $error   = shift;
+    my $logname = "$name.latexmk.log";
+
+    if ($error) {
+
+        # An error occurred during typesetting
+
+        $typesetting_errors = 1;
+        my $texparser_command = "texparser.py '$logname' "
+          . "'$wd/$name' -notify $notification_token";
+        my $output = `$texparser_command`;
+        $output =~ /.*Notification\ Token:\ \|(\d+)\|/;
+        $notification_token = $1;
+    }
+    elsif ( file_has_min_lines( "$logname", 4 ) ) {
+
+        # The state has changed since last time and there are no errors. We
+        # check for state changes by looking at the log. The log produced by
+        # `latexmk` will be about 3 lines long if there were no changes in the
+        # document. If there were any significant changes then the log should be
+        # longer than that.
+
+        $typesetting_errors = 0;
+        close_notification_window();
+        fail_unless_system( "texparser.py", "$logname", "$wd/$name" );
+
+    }
+    elsif ($typesetting_errors) {
+
+        # We might have closed the notification window although there still
+        # were errors. Lets reopen it if it was closed
+
+        my $open_windows  = `"$ENV{DIALOG}" nib --list`;
+        my $window_closed = 1;
+
+        for ( split /^/, $open_windows ) {
+            debug_msg( "Line:", $_ );
+            if (/^$notification_token/) {
+                $window_closed = 0;
+                last;
+            }
+        }
+
+        if ($window_closed) {
+            debug_msg(
+                "Window $notification_token closed." . " Opening new window." );
+
+            my $output = `texparser.py '$logname' '$wd/$name' -notify reload`;
+            $output =~ /.*Notification\ Token:\ \|(\d+)\|/;
+            $notification_token = $1;
+        }
+
+    }
 }
 
-sub offer_to_show_log {
-    my $button = cocoa_dialog(
-        "msgbox",
-        "--title" => "LaTeX Watch: compilation error",
-        "--text"  => "Error compiling $name.tex",
-        "--informative-text" =>
-          "TeX gave an error compiling the file. Shall I show the log?",
-        "--button1" => "Show Log",
-        "--button2" => "Don’t Show"
-    );
-    show_log() if $button == 1;
-}
-
-sub show_log {
-    # OK button pressed
-    fail_unless_system( "mate", "$wd/$name.latexmk.log" );
+sub close_notification_window {
+    if ( $notification_token ne '' ) {
+        fail_unless_system( "$ENV{DIALOG}", "nib", "--dispose",
+            "$notification_token" );
+        $notification_token = '';
+    }
 }
 
 #####################
@@ -541,11 +568,13 @@ sub select_postscript_viewer {
             fail("Failed to execute gv ($?): $!");
         }
         elsif ($?) {
+
             # Assume that gv did not understand the --version option,
             # and that it is therefore a pre-3.6.0 version
             @ps_viewer = qw(gv -spartan -scale 1 -nocenter -antialias -nowatch);
         }
         elsif ( $gv_version =~ /^gv 3.6.0$/ ) {
+
             # This version is hopelessly broken. Give up.
             fail(
                 "Broken GV detected",
@@ -556,6 +585,7 @@ sub select_postscript_viewer {
             );
         }
         elsif ( $gv_version =~ /^gv 3.6.1$/ ) {
+
             # Version 3.6.1 of GV has a bug that means it
             # dies if it receives a HUP signal. Therefore we execute it
             # in watch mode, and don't send a HUP.
@@ -566,6 +596,7 @@ sub select_postscript_viewer {
             $hup_viewer = 0;
         }
         elsif ( $gv_version =~ /^gv 3.6.2$/ ) {
+
             # The --scale bug has still not been fixed in 3.6.2,
             # but the HUP one has.
             @ps_viewer = qw(gv --spartan --nocenter --antialias --nowatch);
@@ -588,6 +619,7 @@ sub select_postscript_viewer {
 sub start_postscript_viewer {
     my $pid = fork();
     if ($pid) {
+
         # In parent
         return $pid;
     }
@@ -648,7 +680,7 @@ my $pdf_viewer_app;
 
 sub select_pdf_viewer {
     my ($viewer) = @_;
-    $viewer ||= "TeXShop";    # TeXShop is the default
+    $viewer ||= "Skim";    # We use Skim as default viewer
 
     debug_msg("PDF Viewer selected ($viewer)");
 
@@ -807,11 +839,13 @@ sub fail_unless_system {
 sub cocoa_dialog {
     pipe( my $rh, my $wh );
     if ( my $pid = fork() ) {
+
         # Parent
         local $/ = "\n";
         my $button = <$rh>;
         waitpid( $pid, 0 );
         if ($?) {
+
             # If we failed to show the dialog, there's not much sense
             # in trying to put up another dialog to explain what happened!
             # Print a message to the console.
@@ -838,6 +872,7 @@ sub cocoa_dialog {
 }
 
 sub applescript {
+
     # We could do this much more efficiently using Mac::OSA
     # but that's only preinstalled on 10.4 and later.
     fail_unless_system( "osascript", "-e", @_ );
@@ -868,6 +903,23 @@ sub check_open {
         }
     );
     return $still_open;
+}
+
+sub file_has_min_lines {
+    my $filepath         = shift;
+    my $min_number_lines = shift;
+
+    open( my $fh, "<", $filepath )
+      or die "Can not open $filepath: $!";
+
+    my $lines = 0;
+    while (<$fh>) {
+        last if ( $lines >= $min_number_lines );
+        $lines++;
+    }
+    close($fh);
+
+    return ( $lines >= $min_number_lines );
 }
 
 __END__
@@ -1041,3 +1093,17 @@ Changes
 
 3.7:
     - Use the bundles `latexmkrc` file
+
+3.8:
+    - We now display a notification window in the case of an error. The window
+    displays all errors containing line information that `texparser` finds in
+    the log output of `latexmk`.
+
+3.9:
+    - Update the list of auxiliary files removed on cleanup.
+
+3.10:
+    - Remove temporary dir created by `pythontex` on cleanup.
+
+3.11:
+    - Remove temporary dir created by package `minted` on cleanup.
