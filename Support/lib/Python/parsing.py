@@ -694,23 +694,31 @@ class LaTexParser(TexParser):
 class LaTexMkParser(TexParser):
     """Parse log messages from latexmk."""
 
-    def __init__(self, input_stream, verbose, filename):
-        """Initialize the regex patterns for the LaTexMkParser."""
+    def __init__(self, input_stream, verbose, filename, use_pvc, round_finished):
+        """Initialize the regex patterns for the LaTexMkParser.
+           The parameter use_pvc is a boolean indicating whether 
+           the -pvc option should be passed to latexmk.
+           round_finished is a callback function executed after each round of latexmk
+        """
         super(LaTexMkParser, self).__init__(input_stream, verbose)
         self.filename = filename
+        self.use_pvc = use_pvc
+        self.round_finished = round_finished
         self.marks = set()
         self.patterns.extend([
             (compile('This is (pdfTeX|latex2e|latex|LuaTeX|XeTeX)'),
              self.start_latex),
             (compile('This is BibTeX'), self.start_bibtex),
             (compile('.*This is Biber'), self.start_biber),
-            (compile('^Latexmk: All targets \(.*?\) are up-to-date'),
-             self.finish_run),
+            #(compile('^Latexmk: All targets \(.*?\) are up-to-date'),
+            #  self.finish_run),
+            (compile('^Latexmk: Log file says output to'), self.finish_run),
             (compile('This is makeindex'), self.start_bibtex),
             (compile('^Latexmk'), self.latexmk),
             (compile('Run number'), self.new_run)
         ])
         self.number_runs = 0
+
 
     def parse_stream(self):
         """Parse log messages from latexmk.
@@ -806,7 +814,13 @@ class LaTexMkParser(TexParser):
 
     def finish_run(self, matching, line):
         self.latexmk(matching, line)
-        self.done = True
+        
+        if self.use_pvc: #never finish running
+            self.round_finished(self, self.fatal_error, self.number_errors, self.number_warnings)
+            
+        else:
+            self.done = True
+        
 
     def latexmk(self, matching, line):
         print('<p class="ltxmk">{}</p>'.format(line))
