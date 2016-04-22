@@ -132,6 +132,41 @@ main_loop();
     }
 }
 
+# Guess the TeX engine which should be used to translate a certain TeX-file.
+#
+# Arguments:
+#
+#      filepath - The file path to the TeX file either as absolute path or
+#                 relative to the location of this file
+#
+# Returns:
+#
+#      A string containing the TeX engine for the given file or an empty
+#      string if the engine could not be determined
+#
+# Example:
+#
+#   We assume `test.tex` contains the line `%!TEX TS-program = pdflatex`
+#   $ guess_tex_engine(test.tex)
+#   "pdflatex"
+#
+sub guess_tex_engine {
+    open( my $fh, "<", @_ )
+      or die "cannot open @_: $!";
+
+    my $engine = "";
+    # TS-program is case insensitive e.g. `LaTeX` should be the same as `latex`
+    my $engines = "(?i)latex|lualatex|pdflatex|xelatex(?-i)";
+    while ( my $line = <$fh> ) {
+        if ( $line =~ /%!TEX(?:\s+)(?:TS-)program(?:\s*)=(?:\s*)($engines)/ ) {
+            $engine = lc($1);
+            last;
+        }
+    }
+    close($fh);
+    return $engine;
+}
+
 sub get_prefs {
     my $engine = guess_tex_engine("$absolute_wd/$name.tex");
     debug_msg("Found type setting program: $engine");
@@ -252,7 +287,7 @@ sub main_loop {
     while (1) {
         if ( document_has_changed() ) {
             debug_msg("Reloading file");
-            my ( $output_exists, $error ) = compile();
+            my ($output_exists, $error) = compile();
             view() if $output_exists;
             parse_log($error);
             if ( defined($progressbar_pid) ) {
@@ -290,13 +325,14 @@ sub main_loop {
 # Clean up if we're interrupted or die
 sub clean_up {
     debug_msg("Cleaning up");
-    if ( defined($wd) ) {
-        unlink(
-            map( "$wd/$name.$_",
-                qw(acn acr alg aux bbl bcf blg fdb_latexmk fls fmt glo glg gls
-                  idx ilg ind ini ist latexmk.log log maf mtc mtc1 nav nlo nls
-                  pytxcode out pdfsync run.xml snm synctex.gz toc) )
-        );
+    unlink(
+        map( "$wd/$name.$_",
+            qw(acn acr alg aux bbl bcf blg fdb_latexmk fls fmt glo glg gls idx
+              ilg ind ini ist latexmk.log log maf mtc mtc1 nav out pdfsync
+              run.xml snm synctex.gz toc) )
+    ) if defined($wd);
+    # Remove LaTeX bundle cache file
+    unlink("$wd/.$name.lb") if defined($wd);
 
         # Remove LaTeX bundle cache file
         unlink("$wd/.$name.lb");
@@ -449,20 +485,22 @@ sub compile {
         if ( -e "$wd/$name.ps" ) {
             $compiled_document      = "$wd/$name.ps";
             $compiled_document_name = "$name.ps";
-            return ( 1, $error );    # Success!
+
+            return (1, $error);    # Success!
         }
         else {
-            return ( 0, $error );    # Failure
+            return (0, $error);    # Failure
         }
     }
     else {                           # PDF mode
         if ( -e "$wd/$name.pdf" ) {
             $compiled_document      = "$wd/$name.pdf";
             $compiled_document_name = "$name.pdf";
-            return ( 1, $error );    # Success!
+
+            return (1, $error);    # Success!
         }
         else {
-            return ( 0, $error );    # Failure
+            return (0, $error);    # Failure
         }
     }
 }
